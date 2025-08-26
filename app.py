@@ -41,14 +41,13 @@ SEED_URLS = [
     "https://www.apple.com/ipad-mini/specs/",
 ]
 
-
 # Bigger chunks & lower overlap => fewer embedding calls (helps free-tier limits).
 MAX_CHARS = 4000
 OVERLAP = 64
 TOP_K = 3
 
 # Embedding backends
-EMBED_BACKEND_DEFAULT = "Gemini (throttled)"  # or "Local (no API limits)"
+EMBED_BACKEND_DEFAULT = "Gemini (throttled)"  # runtime default is overridden to Local if available
 
 # Gemini model IDs (must include 'models/' prefix for the google.generativeai SDK)
 EMBED_MODEL_GEMINI = "models/text-embedding-004"   # 3072-dim
@@ -68,7 +67,6 @@ if not API_KEY:
     except Exception:
         API_KEY = None
 
-
 # -------------------- Helpers --------------------
 def local_backend_available() -> bool:
     try:
@@ -78,6 +76,11 @@ def local_backend_available() -> bool:
     except Exception:
         return False
 
+# Prefer Local on FIRST load if available; else Gemini
+if "embed_backend" not in st.session_state:
+    st.session_state["embed_backend"] = (
+        "Local (no API limits)" if local_backend_available() else "Gemini (throttled)"
+    )
 
 def fetch_text(url: str) -> str:
     """Fetch & lightly clean visible text."""
@@ -92,7 +95,6 @@ def fetch_text(url: str) -> str:
     text = soup.get_text(" ", strip=True)
     return re.sub(r"\s+", " ", text)
 
-
 def chunk(text: str, max_chars: int = MAX_CHARS, overlap: int = OVERLAP) -> t.List[str]:
     """Simple fixed-size chunker with overlap."""
     chunks, i, n = [], 0, len(text)
@@ -104,19 +106,16 @@ def chunk(text: str, max_chars: int = MAX_CHARS, overlap: int = OVERLAP) -> t.Li
         i = max(0, j - overlap)
     return chunks
 
-
 def cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     a = a / (np.linalg.norm(a) + 1e-9)
     b = b / (np.linalg.norm(b) + 1e-9)
     return float(np.dot(a, b))
-
 
 def _extract_embedding_vector(resp) -> np.ndarray:
     """Handle both {'embedding':[...]} and {'embedding':{'values':[...]} shapes."""
     emb = resp.get("embedding")
     vals = emb["values"] if isinstance(emb, dict) and "values" in emb else emb
     return np.array(vals, dtype=np.float32)
-
 
 # -------------------- Embedding backends --------------------
 def embed_texts_gemini(
@@ -152,7 +151,6 @@ def embed_texts_gemini(
         time.sleep(delay)  # throttle
     return vecs
 
-
 @st.cache_resource(show_spinner=False)
 def _load_local_model(model_name: str = LOCAL_EMBED_MODEL):
     """Load sentence-transformers once (cached)."""
@@ -164,13 +162,11 @@ def _load_local_model(model_name: str = LOCAL_EMBED_MODEL):
         raise e
     return SentenceTransformer(model_name)
 
-
 def embed_texts_local(texts: t.List[str], model_name: str = LOCAL_EMBED_MODEL) -> t.List[np.ndarray]:
     """Local CPU embeddings (no quotas)."""
     m = _load_local_model(model_name)
     arr = m.encode(texts, convert_to_numpy=True, normalize_embeddings=False)
     return [np.array(v, dtype=np.float32) for v in arr]
-
 
 # -------------------- RAG core --------------------
 def load_or_build_kb(embed_backend: str) -> dict:
@@ -236,7 +232,6 @@ def load_or_build_kb(embed_backend: str) -> dict:
             }, f)
         return kb
 
-
 def embed_query_with_kb_backend(query: str, kb: dict) -> np.ndarray:
     """Always embed the query with the SAME backend used for the KB."""
     backend = (kb.get("meta") or {}).get("backend") or st.session_state.get("embed_backend", EMBED_BACKEND_DEFAULT)
@@ -244,7 +239,6 @@ def embed_query_with_kb_backend(query: str, kb: dict) -> np.ndarray:
         return embed_texts_gemini([query], api_key=API_KEY)[0]
     else:
         return embed_texts_local([query])[0]
-
 
 def retrieve(kb: dict, query: str, k: int = TOP_K) -> t.List[dict]:
     if not kb.get("vectors"):
@@ -262,7 +256,6 @@ def retrieve(kb: dict, query: str, k: int = TOP_K) -> t.List[dict]:
         for r, i in enumerate(idxs)
     ]
 
-
 def answer_with_rag(query: str, hits):
     """Ask Gemini to answer using ONLY retrieved context; cite [1],[2],… with robust fallbacks."""
     import google.generativeai as genai
@@ -275,13 +268,13 @@ def answer_with_rag(query: str, hits):
     short_context = fmt_ctx(hits[:2])  # retry with smaller prompt if needed
 
     system = (
-    "You are a precise assistant answering questions about Apple iPad models. "
-    "Use ONLY the provided context; if it’s not in context, say you don’t know. "
-    "Always cite sources as [1], [2], etc (matching the brackets in context). "
-    "If the user asks to compare models, return a concise markdown table with rows for: "
-    "Chip, Display (size & tech), Storage options, Cameras, Battery, Dimensions/Weight, "
-    "Apple Pencil/Magic Keyboard compatibility, and Notable features."
-)
+        "You are a precise assistant answering questions about Apple iPad models. "
+        "Use ONLY the provided context; if it’s not in context, say you don’t know. "
+        "Always cite sources as [1], [2], etc (matching the brackets in context). "
+        "If the user asks to compare models, return a concise markdown table with rows for: "
+        "Chip, Display (size & tech), Storage options, Cameras, Battery, Dimensions/Weight, "
+        "Apple Pencil/Magic Keyboard compatibility, and Notable features."
+    )
 
     def call(model_name: str, context: str):
         model = genai.GenerativeModel(
@@ -291,7 +284,6 @@ def answer_with_rag(query: str, hits):
                 temperature=0.2,
                 max_output_tokens=512,
             ),
-            # Relax safety so benign product pages don't get filtered to empty.
             safety_settings={
                 "HARASSMENT": "BLOCK_NONE",
                 "HATE_SPEECH": "BLOCK_NONE",
@@ -299,7 +291,6 @@ def answer_with_rag(query: str, hits):
                 "DANGEROUS": "BLOCK_NONE",
             },
         )
-        # Pass parts explicitly to avoid empty .text edge cases
         return model.generate_content([{
             "role": "user",
             "parts": [
@@ -348,7 +339,6 @@ def answer_with_rag(query: str, hits):
         except Exception:
             continue
 
-    # Friendly message if still empty
     reason = "unknown"
     try:
         fr = resp.candidates[0].finish_reason
@@ -357,24 +347,26 @@ def answer_with_rag(query: str, hits):
         pass
     return f"(The model returned an empty message; finish_reason={reason}. Please try again.)"
 
-
 # -------------------- Sidebar --------------------
 with st.sidebar:
     st.subheader("Settings & Data")
 
+    # Build options dynamically and reflect current selection
     backends = ["Gemini (throttled)"]
     if local_backend_available():
         backends.append("Local (no API limits)")
     else:
         st.caption("To enable Local: `pip install sentence-transformers torch --index-url https://download.pytorch.org/whl/cpu`")
 
+    current = st.session_state.get("embed_backend", EMBED_BACKEND_DEFAULT)
     embed_backend = st.radio(
         "Embeddings backend",
         options=backends,
-        index=0 if EMBED_BACKEND_DEFAULT.startswith("Gemini") else 1,
+        index=backends.index(current) if current in backends else 0,
         help="If you change this, click Rebuild KB so embeddings match."
     )
     st.session_state["embed_backend"] = embed_backend
+    st.caption(f"Backend in use: **{embed_backend}**")
 
     urls_text = st.text_area("Seed URLs (one per line)", value="\n".join(SEED_URLS), height=140)
     col_a, col_b = st.columns(2)
@@ -403,8 +395,8 @@ with st.sidebar:
             st.experimental_rerun()
 
 # -------------------- Preconditions --------------------
-# If building with Gemini backend or chatting at all, we need the API key:
-if (st.session_state.get("embed_backend", EMBED_BACKEND_DEFAULT).startswith("Gemini") or True) and not API_KEY:
+# Chat always uses Gemini -> require API key (even if embeddings are Local)
+if not API_KEY:
     with st.sidebar:
         st.error(
             "GEMINI_API_KEY is not set.\n\n"
@@ -414,7 +406,19 @@ if (st.session_state.get("embed_backend", EMBED_BACKEND_DEFAULT).startswith("Gem
     st.stop()
 
 # -------------------- Build / Load KB --------------------
-kb = load_or_build_kb(st.session_state.get("embed_backend", EMBED_BACKEND_DEFAULT))
+kb = load_or_build_kb(st.session_state["embed_backend"])
+
+# Auto-rebuild if saved KB backend/dimension mismatches the selected backend
+saved_meta = (kb.get("meta") or {})
+saved_backend = saved_meta.get("backend")
+saved_dim = saved_meta.get("embed_dim")
+expected_dim = 384 if st.session_state["embed_backend"].startswith("Local") else 3072
+
+if (saved_backend and saved_backend != st.session_state["embed_backend"]) or (saved_dim and saved_dim != expected_dim):
+    if os.path.exists(KB_PATH):
+        os.remove(KB_PATH)
+    with st.spinner("Rebuilding KB to match the selected embeddings backend…"):
+        kb = load_or_build_kb(st.session_state["embed_backend"])
 
 # -------------------- Chat UI --------------------
 left, right = st.columns([0.62, 0.38])
@@ -452,4 +456,4 @@ with right:
     else:
         st.write("Ask a question to see sources here.")
 
-st.caption("Tip: If you switch embeddings backend, click **Rebuild KB** so query/doc vectors match.")
+st.caption("Tip: If you switch embeddings backend, the KB auto-rebuilds so query/doc vectors match.")
