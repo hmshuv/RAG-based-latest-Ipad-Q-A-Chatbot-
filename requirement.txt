@@ -1,0 +1,8 @@
+streamlit
+beautifulsoup4
+requests
+numpy
+google-generativeai
+# optional for Local embeddings:
+sentence-transformers
+torch --index-url https://download.pytorch.org/whl/cpu
